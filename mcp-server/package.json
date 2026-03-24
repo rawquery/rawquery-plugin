@@ -1,0 +1,25 @@
+{
+  "name": "@rawquery/mcp-server",
+  "version": "1.1.0",
+  "description": "MCP server for rawquery — query data with SQL, explore schemas, manage charts and dashboards",
+  "type": "module",
+  "main": "index.mjs",
+  "bin": {
+    "rawquery-mcp": "index.mjs"
+  },
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "author": "SIA Wyrd",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rawquery/rawquery-plugin"
+  }
+}

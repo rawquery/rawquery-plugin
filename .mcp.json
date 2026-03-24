@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "rawquery": {
+      "command": "node",
+      "args": ["mcp-server/index.mjs"],
+      "env": {
+        "RAWQUERY_API_KEY": "",
+        "RAWQUERY_WORKSPACE": "",
+        "RAWQUERY_API_URL": "https://api.rawquery.dev"
+      }
+    }
+  }
+}

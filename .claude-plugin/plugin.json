@@ -1,9 +1,13 @@
 {
   "name": "rawquery",
-  "description": "rawquery data platform integration — query with SQL, explore schemas, manage connections, build charts and dashboards via the rq CLI",
-  "version": "1.0.0",
+  "description": "rawquery data platform integration — query with SQL, explore schemas, manage connections, build charts and dashboards. Works via rq CLI or MCP server (no CLI needed).",
+  "version": "1.1.0",
   "author": {
     "name": "SIA Wyrd"
   },
-  "homepage": "https://rawquery.dev/docs/claude-code"
+  "homepage": "https://rawquery.dev/docs/claude-code",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rawquery/rawquery-plugin"
+  }
 }
