@@ -31,11 +31,7 @@ The MCP server connects directly to the rawquery API using your API key. No CLI 
 
 ### 1. Get your API key
 
-Go to [rawquery.dev](https://rawquery.dev) > Settings > API Keys, or use the CLI:
-
-```bash
-rq api-keys create --name claude
-```
+Go to [rawquery.dev](https://rawquery.dev) > Settings > API Keys and create a new key.
 
 ### 2. Configure the MCP server
 
