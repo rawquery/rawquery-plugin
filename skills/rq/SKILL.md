@@ -9,21 +9,17 @@ rawquery is a data platform: connect your SaaS, query with SQL, zero infra.
 
 ## How to interact
 
-Use whichever tools are available:
-
-- **MCP tools** (rawquery server): `list_tables`, `describe_table`, `execute_query`, `list_connections`, `trigger_sync`, `create_saved_query`, `run_saved_query`, `create_chart`, `publish_chart`, `create_page`, `publish_page`, `list_transforms`, `run_transform`, `get_usage`
-- **CLI** (if `rq` is installed): `rq query`, `rq tables`, `rq describe`, etc.
-
-If both are available, prefer MCP tools.
+Use the rawquery MCP tools: `list_tables`, `describe_table`, `execute_query`, `list_connections`, `get_connection`, `trigger_sync`, `get_sync_status`, `list_saved_queries`, `create_saved_query`, `run_saved_query`, `list_charts`, `create_chart`, `publish_chart`, `list_pages`, `create_page`, `publish_page`, `list_transforms`, `run_transform`, `get_usage`.
 
 ## Key concepts
 
-- **Schema = connection name.** Connection "my-pg" becomes SQL schema `my_pg`. Tables live at `schema.table`.
+- **Schema = connection name.** Connection "my-pg" becomes SQL schema `my_pg`. Tables are `schema.table`.
 - **Charts, pages are private by default.** `create` does NOT publish. Use `publish` to get a public URL.
 - **Saved query names** use hyphens (`my-query`). **Transform names** use underscores (`my_transform`).
-- **DuckDB SQL dialect**, Postgres-compatible (translated via sqlglot).
 
 ## SQL
+
+DuckDB dialect, Postgres-compatible (translated via sqlglot).
 
 - Tables: `schema.table` (e.g. `stripe.customers`)
 - CTEs, window functions, UNION/INTERSECT/EXCEPT all work
@@ -33,26 +29,26 @@ If both are available, prefer MCP tools.
 
 ## Workflow patterns
 
-### Explore → query
+### Explore
 ```
-list tables → describe table → execute query
+list_tables > describe_table > execute_query
 ```
 
-### Dashboard: sources → charts → public page
+### Dashboard
 ```
-list tables → execute query (test) → create saved query → create chart → create page → publish page
+execute_query (test) > create_saved_query > create_chart > create_page > publish_page
 ```
+
 Chart types: bar, horizontal_bar, line, area, scatter, pie, number, table.
 
-### Teardown: delete in dependency order
+### Teardown (dependency order)
 ```
-pages → charts → saved queries → tables/connections
+pages > charts > saved queries > tables/connections
 ```
-FK constraints enforce this order.
 
 ## Best practices
 
-- Always check column names before querying (describe first, never guess)
-- Use LIMIT when exploring
-- Start simple, refine iteratively
-- Use CTEs for readability
+- Always describe a table before querying. Never guess column names.
+- Use LIMIT when exploring.
+- Start simple, refine iteratively.
+- Use CTEs for readability.
