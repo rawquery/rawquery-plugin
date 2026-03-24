@@ -1,6 +1,6 @@
 {
   "name": "rawquery",
-  "description": "rawquery data platform integration. Query with SQL, explore schemas, manage connections, build charts and dashboards. Works via MCP server (no CLI needed) or rq CLI.",
+  "description": "rawquery data platform integration. Query with SQL, explore schemas, manage connections, build charts and dashboards via MCP server. No CLI needed.",
   "version": "1.2.0",
   "author": {
     "name": "SIA Wyrd"

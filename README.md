@@ -77,7 +77,7 @@ Available when using the MCP server (remote or local via plugin):
 
 ### Skill, agent, commands
 
-The plugin includes a skill (auto-invoked context for rawquery work), a `data-analyst` agent for deep exploration, and guided commands (`/rawquery:explore`, `/rawquery:dashboard`). These work with both MCP tools and the `rq` CLI.
+The plugin includes a skill (auto-invoked context for rawquery work), a `data-analyst` agent for deep exploration, and guided commands (`/rawquery:explore`, `/rawquery:dashboard`). All use the MCP tools.
 
 ## Self-host the MCP server
 
