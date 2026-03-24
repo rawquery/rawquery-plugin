@@ -27,7 +27,7 @@ const portArg = args.find((_, i) => args[i - 1] === "--port");
 const port = parseInt(portArg || process.env.PORT || "3100", 10);
 
 // ---------------------------------------------------------------------------
-// HTTP client factory — returns api() and ws() bound to specific credentials
+// HTTP client factory - returns api() and ws() bound to specific credentials
 // ---------------------------------------------------------------------------
 
 function createClient(apiKey, workspace) {
@@ -60,7 +60,7 @@ function createClient(apiKey, workspace) {
 }
 
 // ---------------------------------------------------------------------------
-// Tool registration — registers all tools on a server using the given client
+// Tool registration - registers all tools on a server using the given client
 // ---------------------------------------------------------------------------
 
 function registerTools(server, client) {
@@ -349,7 +349,7 @@ if (!useSSE) {
 }
 
 // ---------------------------------------------------------------------------
-// Transport: SSE (remote, multi-tenant — credentials from HTTP headers)
+// Transport: SSE (remote, multi-tenant - credentials from HTTP headers)
 // ---------------------------------------------------------------------------
 
 if (useSSE) {
@@ -377,7 +377,7 @@ if (useSSE) {
       return;
     }
 
-    // SSE connection — extract credentials from headers, create per-session server
+    // SSE connection - extract credentials from headers, create per-session server
     if (url.pathname === "/sse" && req.method === "GET") {
       const apiKey = req.headers["x-api-key"];
       const workspace = req.headers["x-workspace"];
@@ -440,6 +440,6 @@ if (useSSE) {
   httpServer.listen(port, () => {
     console.error(`rawquery MCP server (SSE) listening on port ${port}`);
     console.error(`API backend: ${API_BASE}`);
-    console.error(`Multi-tenant mode — credentials from X-API-Key + X-Workspace headers`);
+    console.error(`Multi-tenant mode - credentials from X-API-Key + X-Workspace headers`);
   });
 }

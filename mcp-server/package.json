@@ -1,7 +1,7 @@
 {
   "name": "@rawquery/mcp-server",
   "version": "1.1.0",
-  "description": "MCP server for rawquery — query data with SQL, explore schemas, manage charts and dashboards",
+  "description": "MCP server for rawquery. Query data with SQL, explore schemas, manage charts and dashboards",
   "type": "module",
   "main": "index.mjs",
   "bin": {
