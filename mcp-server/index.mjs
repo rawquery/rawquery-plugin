@@ -26,6 +26,14 @@ const useSSE = args.includes("--sse");
 const portArg = args.find((_, i) => args[i - 1] === "--port");
 const port = parseInt(portArg || process.env.PORT || "3100", 10);
 
+// SSE security limits
+const MAX_SESSIONS = 50;
+const MAX_SESSIONS_PER_IP = 3;
+const SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min
+const MAX_MESSAGE_BYTES = 512 * 1024; // 512 KB
+const API_KEY_MIN_LENGTH = 8;
+const WORKSPACE_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$/;
+
 // ---------------------------------------------------------------------------
 // HTTP client factory - returns api() and ws() bound to specific credentials
 // ---------------------------------------------------------------------------
@@ -341,7 +349,7 @@ if (!useSSE) {
     process.exit(1);
   }
 
-  const server = new McpServer({ name: "rawquery", version: "1.1.0" });
+  const server = new McpServer({ name: "rawquery", version: "1.2.0" });
   registerTools(server, createClient(apiKey, workspace));
 
   const transport = new StdioServerTransport();
@@ -353,16 +361,54 @@ if (!useSSE) {
 // ---------------------------------------------------------------------------
 
 if (useSSE) {
-  // sessionId → { transport, server }
-  const sessions = {};
+  const sessions = {};        // sessionId -> { transport, server, ip, lastActivity, timer }
+  const ipSessionCount = {};  // ip -> count
+
+  function getClientIP(req) {
+    // Caddy sets X-Forwarded-For
+    const forwarded = req.headers["x-forwarded-for"];
+    if (forwarded) return forwarded.split(",")[0].trim();
+    return req.socket.remoteAddress;
+  }
+
+  function destroySession(sessionId) {
+    const session = sessions[sessionId];
+    if (!session) return;
+    clearTimeout(session.timer);
+    if (session.ip && ipSessionCount[session.ip] > 0) {
+      ipSessionCount[session.ip]--;
+      if (ipSessionCount[session.ip] === 0) delete ipSessionCount[session.ip];
+    }
+    delete sessions[sessionId];
+  }
+
+  function resetIdleTimer(sessionId) {
+    const session = sessions[sessionId];
+    if (!session) return;
+    clearTimeout(session.timer);
+    session.lastActivity = Date.now();
+    session.timer = setTimeout(() => {
+      console.error(`Session ${sessionId} idle timeout, closing`);
+      destroySession(sessionId);
+    }, SESSION_IDLE_TIMEOUT_MS);
+  }
+
+  async function validateApiKey(apiKey, workspace) {
+    // Validate key by hitting a lightweight endpoint
+    const url = `${API_BASE}/api/v1/workspaces/${encodeURIComponent(workspace)}/usage/current`;
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { "X-API-Key": apiKey },
+    });
+    return res.ok || res.status === 403; // 403 = valid key but no access to workspace
+  }
 
   const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${port}`);
+    const ip = getClientIP(req);
 
-    // CORS
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-API-Key, X-Workspace");
+    // No CORS - MCP clients connect server-side, not from browsers
+    // If a browser-based client needs it, add specific origin, not *
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -370,39 +416,86 @@ if (useSSE) {
       return;
     }
 
-    // Health check
+    // Health check - no session count leak
     if (url.pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", sessions: Object.keys(sessions).length }));
+      res.end(JSON.stringify({ status: "ok" }));
       return;
     }
 
-    // SSE connection - extract credentials from headers, create per-session server
+    // SSE connection
     if (url.pathname === "/sse" && req.method === "GET") {
       const apiKey = req.headers["x-api-key"];
       const workspace = req.headers["x-workspace"];
 
-      if (!apiKey) {
+      // --- Input validation ---
+      if (!apiKey || typeof apiKey !== "string" || apiKey.length < API_KEY_MIN_LENGTH) {
         res.writeHead(401, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Missing X-API-Key header" }));
-        return;
-      }
-      if (!workspace) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Missing X-Workspace header" }));
+        res.end(JSON.stringify({ error: "Invalid or missing X-API-Key header" }));
         return;
       }
 
-      const mcpServer = new McpServer({ name: "rawquery", version: "1.1.0" });
+      if (!workspace || typeof workspace !== "string" || !WORKSPACE_PATTERN.test(workspace)) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid or missing X-Workspace header" }));
+        return;
+      }
+
+      // --- Global session cap ---
+      if (Object.keys(sessions).length >= MAX_SESSIONS) {
+        console.error(`Global session limit reached (${MAX_SESSIONS}), rejecting ${ip}`);
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Server at capacity, try again later" }));
+        return;
+      }
+
+      // --- Per-IP session cap ---
+      const currentIPSessions = ipSessionCount[ip] || 0;
+      if (currentIPSessions >= MAX_SESSIONS_PER_IP) {
+        console.error(`Per-IP session limit (${MAX_SESSIONS_PER_IP}) reached for ${ip}`);
+        res.writeHead(429, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Too many sessions from this IP" }));
+        return;
+      }
+
+      // --- Validate API key against the real API before accepting ---
+      try {
+        const valid = await validateApiKey(apiKey, workspace);
+        if (!valid) {
+          console.error(`Invalid API key from ${ip}`);
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid API key" }));
+          return;
+        }
+      } catch (err) {
+        console.error(`API key validation failed: ${err.message}`);
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Could not validate API key" }));
+        return;
+      }
+
+      // --- Create session ---
+      const mcpServer = new McpServer({ name: "rawquery", version: "1.2.0" });
       registerTools(mcpServer, createClient(apiKey, workspace));
 
       const transport = new SSEServerTransport("/messages", res);
-      sessions[transport.sessionId] = { transport, server: mcpServer };
+      const sessionId = transport.sessionId;
 
-      res.on("close", () => {
-        delete sessions[transport.sessionId];
-      });
+      ipSessionCount[ip] = (ipSessionCount[ip] || 0) + 1;
 
+      sessions[sessionId] = {
+        transport,
+        server: mcpServer,
+        ip,
+        lastActivity: Date.now(),
+        timer: null,
+      };
+
+      resetIdleTimer(sessionId);
+
+      res.on("close", () => destroySession(sessionId));
+
+      console.error(`Session ${sessionId} opened for workspace ${workspace} from ${ip} (${Object.keys(sessions).length} active)`);
       await mcpServer.connect(transport);
       return;
     }
@@ -417,13 +510,31 @@ if (useSSE) {
         return;
       }
 
+      // Body size limit
       let body = "";
-      req.on("data", (chunk) => (body += chunk));
+      let exceeded = false;
+      req.on("data", (chunk) => {
+        body += chunk;
+        if (body.length > MAX_MESSAGE_BYTES) {
+          exceeded = true;
+          req.destroy();
+        }
+      });
       req.on("end", async () => {
+        if (exceeded) {
+          if (!res.headersSent) {
+            res.writeHead(413, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Message too large" }));
+          }
+          return;
+        }
+
+        resetIdleTimer(sessionId);
+
         try {
           await session.transport.handlePostMessage(req, res, body);
         } catch (err) {
-          console.error("Message handling error:", err);
+          console.error("Message handling error:", err.message);
           if (!res.headersSent) {
             res.writeHead(500, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "Internal error" }));
@@ -440,6 +551,6 @@ if (useSSE) {
   httpServer.listen(port, () => {
     console.error(`rawquery MCP server (SSE) listening on port ${port}`);
     console.error(`API backend: ${API_BASE}`);
-    console.error(`Multi-tenant mode - credentials from X-API-Key + X-Workspace headers`);
+    console.error(`Limits: ${MAX_SESSIONS} sessions max, ${MAX_SESSIONS_PER_IP}/IP, ${SESSION_IDLE_TIMEOUT_MS / 60000}min idle timeout`);
   });
 }
