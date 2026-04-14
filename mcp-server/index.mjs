@@ -13,8 +13,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { createServer } from "http";
+import { randomUUID } from "crypto";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -39,9 +41,14 @@ const WORKSPACE_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$/;
 // ---------------------------------------------------------------------------
 
 function createClient(apiKey, workspace) {
+  // Bearer auth (rqt_*) if apiKey starts with "rqt_", otherwise X-API-Key
+  const authHeader = apiKey.startsWith("rqt_")
+    ? { Authorization: `Bearer ${apiKey}` }
+    : { "X-API-Key": apiKey };
+
   async function api(method, path, body = null) {
     const url = `${API_BASE}/api/v1${path}`;
-    const headers = { "X-API-Key": apiKey, "Content-Type": "application/json" };
+    const headers = { ...authHeader, "Content-Type": "application/json" };
     const opts = { method, headers };
     if (body) opts.body = JSON.stringify(body);
 
@@ -68,11 +75,96 @@ function createClient(apiKey, workspace) {
 }
 
 // ---------------------------------------------------------------------------
+// OAuth introspection — validates Bearer tokens via the API
+// ---------------------------------------------------------------------------
+
+const INTROSPECT_CACHE = new Map(); // token -> { data, expires }
+const INTROSPECT_CACHE_TTL_MS = 60 * 1000;
+const INTROSPECT_CACHE_MAX = 10000;
+
+async function introspectToken(token) {
+  const now = Date.now();
+  const cached = INTROSPECT_CACHE.get(token);
+  if (cached && cached.expires > now) return cached.data;
+
+  const secret = process.env.OAUTH_INTROSPECT_SECRET;
+  if (!secret) {
+    throw new Error("OAUTH_INTROSPECT_SECRET not configured");
+  }
+
+  const body = new URLSearchParams({ token }).toString();
+  const res = await fetch(`${API_BASE}/api/v1/oauth/introspect`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "X-Introspect-Secret": secret,
+    },
+    body,
+  });
+
+  if (!res.ok) {
+    return { active: false };
+  }
+
+  const data = await res.json();
+
+  // LRU eviction
+  if (INTROSPECT_CACHE.size >= INTROSPECT_CACHE_MAX) {
+    const firstKey = INTROSPECT_CACHE.keys().next().value;
+    INTROSPECT_CACHE.delete(firstKey);
+  }
+  INTROSPECT_CACHE.set(token, { data, expires: now + INTROSPECT_CACHE_TTL_MS });
+  return data;
+}
+
+function invalidateIntrospectCache(token) {
+  INTROSPECT_CACHE.delete(token);
+}
+
+// ---------------------------------------------------------------------------
+// Scope enforcement — which tools require which scope
+// ---------------------------------------------------------------------------
+
+const WRITE_TOOLS = new Set([
+  "create_saved_query",
+  "create_chart",
+  "publish_chart",
+  "create_page",
+  "publish_page",
+  "trigger_sync",
+  "run_transform",
+]);
+
+function requiredScopeForTool(toolName) {
+  return WRITE_TOOLS.has(toolName) ? "workspace:write" : "workspace:read";
+}
+
+function hasScope(granted, required) {
+  const scopes = new Set((granted || "").split(/\s+/));
+  if (required === "workspace:read") {
+    return scopes.has("workspace:read") || scopes.has("workspace:write");
+  }
+  return scopes.has(required);
+}
+
+// ---------------------------------------------------------------------------
 // Tool registration - registers all tools on a server using the given client
 // ---------------------------------------------------------------------------
 
-function registerTools(server, client) {
+function registerTools(server, client, grantedScope = "workspace:write") {
   const { api, ws } = client;
+
+  // Wrap server.tool to skip tools the caller doesn't have scope for.
+  // Default grantedScope is "workspace:write" so stdio/SSE (legacy, full API key)
+  // behavior is unchanged.
+  const originalTool = server.tool.bind(server);
+  server.tool = function (name, ...rest) {
+    const required = requiredScopeForTool(name);
+    if (!hasScope(grantedScope, required)) {
+      return; // don't register this tool
+    }
+    return originalTool(name, ...rest);
+  };
 
   // ---- Exploration --------------------------------------------------------
 
@@ -403,6 +495,102 @@ if (useSSE) {
     return res.ok || res.status === 403; // 403 = valid key but no access to workspace
   }
 
+  // ---------------------------------------------------------------------------
+  // Streamable HTTP handler (per-request session, OAuth Bearer auth)
+  // ---------------------------------------------------------------------------
+
+  const streamableSessions = {}; // sessionId -> { transport, server, token }
+
+  function sendOAuthChallenge(res, errorCode, description) {
+    const wwwAuth = `Bearer realm="rawquery", error="${errorCode}", error_description="${description}", resource_metadata="${API_BASE.replace(/\/api.*$/, "")}/.well-known/oauth-protected-resource"`;
+    res.writeHead(401, {
+      "Content-Type": "application/json",
+      "WWW-Authenticate": wwwAuth,
+    });
+    res.end(JSON.stringify({ error: errorCode, error_description: description }));
+  }
+
+  async function handleStreamableHTTP(req, res, ip) {
+    // Bearer auth required
+    const auth = req.headers["authorization"] || "";
+    if (!auth.toLowerCase().startsWith("bearer ")) {
+      return sendOAuthChallenge(res, "invalid_token", "Missing Bearer token");
+    }
+    const token = auth.slice(7).trim();
+    if (!token.startsWith("rqt_")) {
+      return sendOAuthChallenge(res, "invalid_token", "Not an OAuth token");
+    }
+
+    // Introspect
+    let tokenInfo;
+    try {
+      tokenInfo = await introspectToken(token);
+    } catch (err) {
+      console.error("Introspection failed:", err.message);
+      res.writeHead(502, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "server_error", error_description: "Auth server unreachable" }));
+      return;
+    }
+
+    if (!tokenInfo.active) {
+      return sendOAuthChallenge(res, "invalid_token", "Token is invalid, revoked, or expired");
+    }
+
+    // Per-IP session cap (same as SSE)
+    if ((ipSessionCount[ip] || 0) + Object.keys(streamableSessions).filter((s) => streamableSessions[s].ip === ip).length >= MAX_SESSIONS_PER_IP) {
+      res.writeHead(429, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Too many sessions from this IP" }));
+      return;
+    }
+
+    // Session ID from header (client-driven) or create on initialize
+    const existingSessionId = req.headers["mcp-session-id"];
+    let session = existingSessionId ? streamableSessions[existingSessionId] : null;
+
+    // Token binding: a session is pinned to the token that created it.
+    // If a different token tries to reuse a session, reject.
+    if (session && session.token !== token) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "forbidden", error_description: "Session bound to a different token" }));
+      return;
+    }
+
+    if (!session) {
+      // New session — initialize MCP server bound to this token + workspace
+      const mcpServer = new McpServer({ name: "rawquery", version: "1.2.0" });
+      const client = createClient(token, tokenInfo.workspace_id);
+      registerTools(mcpServer, client, tokenInfo.scope);
+
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (sid) => {
+          console.error(`Streamable session ${sid} opened for ws=${tokenInfo.workspace_id} from ${ip}`);
+        },
+      });
+
+      await mcpServer.connect(transport);
+
+      // Wait until the transport has a sessionId (assigned during initialize)
+      transport.onclose = () => {
+        const sid = transport.sessionId;
+        if (sid && streamableSessions[sid]) {
+          delete streamableSessions[sid];
+        }
+      };
+
+      // Register on initialize by hooking after handling — simplest: dispatch and register
+      // StreamableHTTPServerTransport assigns sessionId during the initialize request.
+      await transport.handleRequest(req, res);
+      if (transport.sessionId) {
+        streamableSessions[transport.sessionId] = { transport, server: mcpServer, token, ip };
+      }
+      return;
+    }
+
+    // Existing session — dispatch
+    await session.transport.handleRequest(req, res);
+  }
+
   const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${port}`);
     const ip = getClientIP(req);
@@ -420,6 +608,28 @@ if (useSSE) {
     if (url.pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+
+    // OAuth Protected Resource Metadata (RFC 9728)
+    // Tells OAuth clients where to authenticate for this MCP resource.
+    if (url.pathname === "/.well-known/oauth-protected-resource") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          resource: `https://mcp.rawquery.dev`,
+          authorization_servers: [API_BASE],
+          scopes_supported: ["workspace:read", "workspace:write"],
+          bearer_methods_supported: ["header"],
+        })
+      );
+      return;
+    }
+
+    // ---- Streamable HTTP transport (MCP 2025 spec, OAuth Bearer auth) ----
+    // Claude.ai, ChatGPT, and other modern MCP clients use this transport.
+    if (url.pathname === "/mcp") {
+      await handleStreamableHTTP(req, res, ip);
       return;
     }
 
