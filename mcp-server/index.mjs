@@ -630,7 +630,8 @@ if (useSSE) {
 
     // ---- Streamable HTTP transport (MCP 2025 spec, OAuth Bearer auth) ----
     // Claude.ai, ChatGPT, and other modern MCP clients use this transport.
-    if (url.pathname === "/mcp") {
+    // Accept both /mcp and / (clients vary in how they expect the endpoint).
+    if (url.pathname === "/mcp" || url.pathname === "/") {
       await handleStreamableHTTP(req, res, ip);
       return;
     }
