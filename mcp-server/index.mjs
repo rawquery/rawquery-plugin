@@ -501,8 +501,10 @@ if (useSSE) {
 
   const streamableSessions = {}; // sessionId -> { transport, server, token }
 
+  const MCP_PUBLIC_URL = process.env.MCP_PUBLIC_URL || "https://mcp.rawquery.dev";
+
   function sendOAuthChallenge(res, errorCode, description) {
-    const wwwAuth = `Bearer realm="rawquery", error="${errorCode}", error_description="${description}", resource_metadata="${API_BASE.replace(/\/api.*$/, "")}/.well-known/oauth-protected-resource"`;
+    const wwwAuth = `Bearer realm="rawquery", error="${errorCode}", error_description="${description}", resource_metadata="${MCP_PUBLIC_URL}/.well-known/oauth-protected-resource"`;
     res.writeHead(401, {
       "Content-Type": "application/json",
       "WWW-Authenticate": wwwAuth,
@@ -617,7 +619,7 @@ if (useSSE) {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(
         JSON.stringify({
-          resource: `https://mcp.rawquery.dev`,
+          resource: process.env.MCP_PUBLIC_URL || "https://mcp.rawquery.dev",
           authorization_servers: [API_BASE],
           scopes_supported: ["workspace:read", "workspace:write"],
           bearer_methods_supported: ["header"],
